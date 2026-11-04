@@ -1,0 +1,39 @@
+# Binaries and tarballs -- re-fetch with scripts/01-install.sh
+downloads/
+*.tar.gz
+*.tgz
+*.zip
+
+# Installed software (lives in ~/opt, never committed)
+opt/
+
+# HDFS/YARN state, logs, PIDs -- all under ~/hadoop-data
+hadoop-data/
+logs/
+*.log
+*.pid
+*.out
+
+# Generated benchmark data and kit run output
+data/
+TPCx-HS-result*/
+HSGen*/
+HSSort*/
+HSValidate*/
+
+# Never commit credentials or keys
+*.pem
+*.key
+id_rsa*
+*authorized_keys*
+
+# Editor/OS noise
+.DS_Store
+*.swp
+.vscode/
+
+# TPCx-HS kit material is NOT redistributable (kit EULA v2.1 clause 4.a).
+# Obtain the kit from tpc.org; never commit kit files or derivatives of them.
+conf/kit/*.orig
+conf/kit/USER_GUIDE.txt
+conf/kit/TPCx-HS*

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!-- TPCx-HS Milestone 2 : single-node pseudo-distributed -->
+<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://localhost:8020</value>
+    <description>
+      Port 8020, not the 9000 seen in many tutorials. 8020 is Hadoop's own
+      default NameNode RPC port, and the kit's HSDataCheck class hardcodes
+      hdfs://127.0.0.1:8020 (TPCx-HS-SRC-MR2/HSDataCheck.java:34). Matching it
+      makes the kit's verification tool work without patching kit source.
+    </description>
+  </property>
+  <property>
+    <name>hadoop.tmp.dir</name>
+    <value>/home/jiho/hadoop-data/tmp</value>
+    <description>Kept under $HOME: no root privileges are available on this VM.</description>
+  </property>
+  <property>
+    <name>io.file.buffer.size</name>
+    <value>131072</value>
+  </property>
+</configuration>

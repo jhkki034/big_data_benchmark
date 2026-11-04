@@ -1,0 +1,340 @@
+# TPCx-HS Milestone 2 — System Architecture Design & Build
+
+Single-node Hadoop cluster built to run the TPCx-HS v2.0.3 benchmark kit, with
+a 1 GB HSGen dataset generated, loaded into HDFS and verified.
+
+**Status: complete.** Milestone 3 (HSSort / HSValidate performance measurement)
+is deliberately out of scope here; the cluster is left running and ready for it.
+
+---
+
+## 1. Environment (measured, not assumed)
+
+| Item | Value | How checked |
+|------|-------|-------------|
+| Host | macOS + UTM virtual machine | given |
+| Guest OS | Ubuntu 22.04.5 LTS (Jammy) | `/etc/os-release` |
+| Kernel | 5.15.0-187-generic | `uname -a` |
+| Architecture | **aarch64 (ARM64)** | `uname -m` |
+| Hostname | `jihopc` | `hostname` |
+| CPU | 6 vCPU | `nproc` |
+| RAM | 3.8 GiB total, ~1.7 GiB free | `free -h` |
+| Swap | 3.8 GiB | `free -h` |
+| Disk | 30 GB volume, **9.2 GB free** after build | `df -h /` |
+| Java | Eclipse Temurin **OpenJDK 1.8.0_504** (aarch64) | `java -version` |
+| Hadoop | Apache **3.3.6**, `linux-aarch_64` build | `hadoop version` |
+| Kit | **TPCx-HS v2.0.3**, MapReduce (MR2) jar | `VERSION.txt` |
+| Spec | TPCx-HS Specification v2.0.3 | `TPCx-HS Specification.docx` in the kit |
+
+Two numbers differed from the brief and are worth noting: free disk was
+**13 GB** at the start (not ~15 GB), and usable RAM is only ~1.7 GiB because
+Grafana, InfluxDB and two VS Code server instances are resident. Every memory
+setting below follows from that second number.
+
+### Why these versions
+
+- **aarch64 throughout.** Hadoop publishes a separate
+  `hadoop-3.3.6-aarch64.tar.gz` with real ARM64 native libraries;
+  `hadoop checknative -a` confirms `libhadoop.so.1.0.0` loads. The generic
+  x86 tarball would have run Java-only codecs.
+- **JDK 8, not 11.** The kit's jar is Java 7 bytecode
+  (`HSGen.class` major version 51, manifest `Created-By: 1.7.0_09`). JDK 8 runs
+  it directly and is a fully supported Hadoop 3.3.6 runtime; JDK 11 adds risk
+  for no benefit here.
+- **No root.** `sudo` on this VM requires a password, so everything is
+  installed under `$HOME` (`~/opt`) rather than `/usr/local`. This is why the
+  kit's own driver script cannot be used unmodified (see §6).
+
+---
+
+## 2. Node configuration
+
+One host, pseudo-distributed: five daemons in five JVMs over loopback.
+
+| Daemon | Heap | Role |
+|--------|------|------|
+| NameNode | 512 MB | Namespace + block map. RPC on `localhost:8020`, UI on `:9870`. |
+| DataNode | 256 MB | Stores blocks on the ext4 volume. The only bulk-data mover. |
+| SecondaryNameNode | 256 MB | Merges the edit log into new fsimage checkpoints. Pinned to `localhost:9868`. |
+| ResourceManager | 384 MB | Scheduler; owns the 2048 MB / 4 vcore container pool. |
+| NodeManager | 384 MB | Launches containers, enforces memory, serves shuffle. |
+
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the component/data-flow write-up
+intended for the report and slides.
+
+---
+
+## 3. Build order
+
+Every step is a script in [`scripts/`](scripts/), numbered in run order and
+re-runnable from a clean VM.
+
+```bash
+cd ~/tpcxhs-m2
+./scripts/01-install.sh        # fetch + unpack JDK 8 and Hadoop, apply conf/
+./scripts/01b-setup-ssh.sh     # passwordless ssh to localhost
+./scripts/02-format-hdfs.sh    # format the NameNode (refuses if data exists)
+./scripts/03-start-cluster.sh  # start HDFS + YARN, wait for safe mode, check jps
+./scripts/05-hsgen.sh 1        # generate 1 GB with the kit's HSGen
+./scripts/07-hsdatacheck.sh    # the kit's HSDataCheck + size/record accounting
+./scripts/06-verify.sh /user/jiho/TPCx-HS-benchmark/HSsort-input
+./scripts/04-stop-cluster.sh   # stop (data is kept)
+```
+
+`scripts/00-env.sh` holds the shared environment and is sourced by the rest.
+
+### Integrity
+
+The Hadoop tarball was checksum-verified before use:
+
+```
+sha512sum hadoop-3.3.6-aarch64.tar.gz
+b0a485c5ae0d97b08285bb83a3dd78b834153b2bd53f96ac301852862ccaff139f2c547aee...
+# matches https://dlcdn.apache.org/.../hadoop-3.3.6-aarch64.tar.gz.sha512
+```
+
+(The published checksum file labels itself `hadoop-3.3.6-RC1.tar.gz` — Apache's
+release-candidate naming. The hash is the one for the aarch64 artifact.)
+
+---
+
+## 4. Configuration
+
+Committed under [`conf/hadoop/`](conf/hadoop/) and copied into
+`$HADOOP_HOME/etc/hadoop` by `01-install.sh`. The non-obvious settings:
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `fs.defaultFS` | `hdfs://localhost:8020` | **Not 9000.** The kit's `HSDataCheck` class hardcodes `hdfs://127.0.0.1:8020` (`TPCx-HS-SRC-MR2/HSDataCheck.java:34`). 8020 is also Hadoop's own default. Matching it makes the kit's verification tool work without patching kit source. |
+| `dfs.replication` | `1` | Forced by having one node. See §8. |
+| `dfs.blocksize` | 128 MB | Default; a 1 GB dataset spans ~7.5 blocks. |
+| `dfs.datanode.du.reserved` | 2 GB | Stops HDFS from filling the root filesystem. |
+| `dfs.namenode.secondary.http-address` | `localhost:9868` | Left at the `0.0.0.0` default, `start-dfs.sh` rewrites it to `$(hostname)` and ssh's to `jihopc`, which was not an authorised host — the SecondaryNameNode silently failed to start. |
+| `yarn.nodemanager.resource.memory-mb` | 2048 | The container pool, sized against ~1.7 GiB free RAM + swap. |
+| `yarn.scheduler.maximum-allocation-mb` | 1024 | Caps any single container. |
+| `yarn.nodemanager.resource.cpu-vcores` | 4 | 6 vCPUs, 2 left for the OS and HDFS daemons. |
+| `yarn.nodemanager.vmem-check-enabled` | `false` | The JVM reserves a large virtual address space on aarch64; the default 2.1× vmem ratio kills healthy containers. Physical-memory enforcement stays on. |
+| `mapreduce.map.memory.mb` / `java.opts` | 768 / `-Xmx600m` | Heap held at ~78% of the container so JVM overhead does not trip the pmem check. |
+| daemon heaps | see `hadoop-env-tpcxhs.sh` | Hadoop's 1 GB-per-daemon default × 5 daemons would exceed physical RAM. |
+
+Kit settings are in [`conf/kit/Benchmark_Parameters.sh`](conf/kit/Benchmark_Parameters.sh)
+— a parameter **overlay** written for this repo, not a copy of the kit's file.
+**The kit directory itself was not modified.**
+
+> **Licence:** no TPCx-HS kit material is committed to this repository. The kit
+> EULA v2.1 clause 4.a forbids reproducing or distributing kit files, and
+> 4.a.(3) forbids contributing them to third-party projects. `.gitignore`
+> blocks them. Get the kit from <https://www.tpc.org/tpcx-hs/>.
+
+| Kit parameter | Shipped | Here | Reason |
+|---------------|---------|------|--------|
+| `HADOOP_USER` / `HDFS_USER` | `root` | `jiho` | No root; `jiho` formatted the NameNode and is the HDFS superuser. |
+| `NUM_MAPS` | 768 | 4 | 4 vcores available. 768 maps would serialise into ~192 waves. |
+| `NUM_REDUCERS` | 768 | 4 | Ignored by HSGen (map-only), used by HSSort in M3. |
+
+---
+
+## 5. SSH
+
+Hadoop's `start-dfs.sh` / `start-yarn.sh` ssh into every host in
+`etc/hadoop/workers` (here: `localhost`). `01b-setup-ssh.sh` creates a
+**dedicated** key (`~/.ssh/id_rsa_hadoop`) rather than touching any default
+identity, refuses to overwrite an existing key, and authorises
+`localhost`, `127.0.0.1`, `0.0.0.0` and the short hostname `jihopc`.
+
+The key has an empty passphrase because the `sbin` scripts cannot answer a
+prompt. It is authorised for loopback only, and no key or passphrase is stored
+in this repository — `.gitignore` excludes `id_rsa*` and `*authorized_keys*`.
+
+---
+
+## 6. HSGen run
+
+### Why not `./TPCx-HS-master.sh -m -g 1`
+
+The kit's driver was read before being used (`USER_GUIDE.txt`,
+`TPCx-HS-master.sh`). Four findings ruled out running it as-is:
+
+1. **Its smallest scale factor is 100 GB.** `-g 1` sets
+   `hssize=1000000000` *records* × 100 B = 100 GB
+   (`TPCx-HS-master.sh:103`), and the guide labels it "for test purpose only,
+   not a valid Scale Factor". This VM has ~10 GB of HDFS capacity. No `-g`
+   option fits.
+2. **It runs the full suite twice** — HSGen → HSSort → HSValidate, `for i in
+   seq 1 2` — which is Milestone 3 scope.
+3. **It deletes data without asking:** each run begins with
+   `hadoop fs -rm -r -skipTrash /user/$HADOOP_USER/$HDFS_BENCHMARK_DIR/*`.
+4. **It needs `sudo`** (`sudo -u $HDFS_USER hadoop fs -mkdir ...`), which
+   requires a password here.
+
+So `scripts/05-hsgen.sh` invokes the kit's `HSGen` class directly, with the
+driver's exact command line and the kit's parameters — same benchmark code,
+smaller record count, nothing destroyed:
+
+```bash
+hadoop jar TPCx-HS-master_MR2.jar HSGen \
+    -Dmapreduce.job.maps=4 -Dmapreduce.job.reduces=4 \
+    -Dmapred.map.tasks=4   -Dmapred.reduce.tasks=4   \
+    10000000 /user/jiho/TPCx-HS-benchmark/HSsort-input
+```
+
+### Scale
+
+A record is 100 bytes — `KEY_LENGTH 10 + VALUE_LENGTH 90`
+(`TPCx-HS-SRC-MR2/HSInputFormat.java:55-57`) — so `records = GB × 10,000,000`.
+**1 GB = 10,000,000 records.** `HSGen` is map-only:
+`HSGen.java:300` calls `job.setNumReduceTasks(0)`.
+
+### Result
+
+```
+Map input records   = 10,000,000
+Map output records  = 10,000,000
+HDFS bytes written  = 1,000,000,000
+Launched map tasks  = 4
+HSGen$Counters CHECKSUM = 21472776955442690
+real    0m28.356s
+```
+
+The CHECKSUM is what HSValidate compares against in Milestone 3 — keep it.
+
+---
+
+## 7. Verification
+
+HDFS path: `/user/jiho/TPCx-HS-benchmark/HSsort-input`
+
+```
+$ hdfs dfs -ls /user/jiho/TPCx-HS-benchmark/HSsort-input
+-rw-r--r--   1 jiho supergroup          0 ... /_SUCCESS
+-rw-r--r--   1 jiho supergroup  250000000 ... /part-m-00000
+-rw-r--r--   1 jiho supergroup  250000000 ... /part-m-00001
+-rw-r--r--   1 jiho supergroup  250000000 ... /part-m-00002
+-rw-r--r--   1 jiho supergroup  250000000 ... /part-m-00003
+
+$ hdfs dfs -du -h -s /user/jiho/TPCx-HS-benchmark/HSsort-input
+953.7 M  953.7 M  /user/jiho/TPCx-HS-benchmark/HSsort-input
+```
+
+953.7 MiB = 1,000,000,000 bytes exactly (the kit counts in decimal GB).
+
+| Check | Result |
+|-------|--------|
+| `jps` — all 5 daemons | PASS |
+| Kit `HSDataCheck.sh` (`hdfs dfs -ls`) | PASS — 4 parts + `_SUCCESS` |
+| Kit `HSDataCheck` class | PASS — lists all 5 files via `hdfs://127.0.0.1:8020` |
+| Byte count | PASS — 1,000,000,000 B = 10,000,000 × 100 B |
+| `hdfs fsck /` | HEALTHY — 0 corrupt, 0 missing, 0 under-replicated |
+| `yarn node -list` | 1 node RUNNING (`jihopc:36691`) |
+| Record format | PASS — first record is 100 B and begins `JimGrayRIP`, the kit's generator signature |
+
+```
+$ hdfs dfs -cat .../part-m-00000 | head -c 100 | od -c
+0000000   J   i   m   G   r   a   y   R   I   P  \0 021   0   0   0   0
+...
+0000144                                        <- octal 144 = 100 bytes
+```
+
+### Final disk state
+
+```
+$ df -h /
+/dev/mapper/ubuntu--vg-ubuntu--lv   30G   20G  9.2G  68% /
+
+$ hdfs dfs -df -h /
+hdfs://localhost:8020  27.8 G  961.7 M  9.1 G  3%
+```
+
+### Why the dataset stayed at 1 GB
+
+HSSort needs roughly **3× the input** (HDFS input + local spill + HDFS output).
+Against 9.2 GB free:
+
+| Input | Sort needs | Left over | Verdict |
+|-------|-----------|-----------|---------|
+| 1 GB | ~2 GB | ~7 GB | comfortable — **chosen** |
+| 2 GB | ~4 GB | ~4 GB | safe ceiling for M3 |
+| 3 GB | ~6 GB | ~1 GB | collides with the 2 GB DataNode reserve |
+
+1 GB is kept so Milestone 3 has room to work, and HSGen takes only 28 s if a
+larger set is wanted later. `05-hsgen.sh` enforces the 3× rule before
+generating anything and refuses to overwrite an existing dataset.
+
+---
+
+## 8. Known limitations and deviations from the specification
+
+1. **`dfs.replication = 1`, spec requires ≥ 3.** A single node cannot hold
+   three independent replicas. This is the headline non-compliance.
+2. **Scale factor far below the minimum.** The smallest *valid* TPCx-HS scale
+   factor is 1 TB; the smallest the kit's driver even offers is 100 GB. This
+   run is 1 GB — three orders of magnitude below, and chosen only to fit the VM.
+3. **Single node, so no cluster data distribution.** No rack awareness, no
+   network shuffle between hosts, no node-failure behaviour to observe.
+4. **The kit's driver was not used.** HSGen was invoked directly for the four
+   reasons in §6. No performance metric (HSph@SF) is produced or claimed.
+5. **Cluster Validation Suite skipped.** It requires `clush`/`pdsh`, which are
+   meaningless on one node (and would need root to install).
+6. **Memory is oversubscribed.** The 2048 MB container pool overlaps swap, and
+   ~2 GB of RAM is held by unrelated services (Grafana, InfluxDB, VS Code
+   server). Milestone 3 sort timings will be pessimistic and should not be
+   compared against published results.
+7. **Installed under `$HOME`, not system paths**, because `sudo` needs a
+   password. Functionally equivalent, but not how a production cluster is laid
+   out.
+8. **`yarn.nodemanager.vmem-check-enabled=false`** is a deviation from Hadoop
+   defaults, needed because of aarch64 JVM virtual-memory reservation.
+
+**Nothing here should be published or reported as a TPCx-HS result.** It is a
+valid architecture and functional-correctness exercise, which is what
+Milestones 2 and 3 ask for.
+
+---
+
+## 9. Handover: what Milestone 3 does next
+
+The cluster is left **running** with the 1 GB dataset in place.
+
+1. Bring the cluster up if needed: `./scripts/03-start-cluster.sh`
+2. Decide the input size — **2 GB is the safe ceiling**, see §7. To change it:
+   `hdfs dfs -rm -r -skipTrash /user/jiho/TPCx-HS-benchmark/HSsort-input`
+   then `./scripts/05-hsgen.sh 2`
+3. Run HSSort with the kit's command line
+   (`TPCx-HS-master.sh:265`):
+   ```bash
+   hadoop jar $KIT/TPCx-HS-master_MR2.jar HSSort \
+       -Dmapreduce.job.maps=4 -Dmapreduce.job.reduces=4 \
+       /user/jiho/TPCx-HS-benchmark/HSsort-input \
+       /user/jiho/TPCx-HS-benchmark/HSsort-output
+   ```
+   Expect to tune `NUM_REDUCERS` — HSSort is the memory-hungry step and the one
+   this VM is tight for.
+4. Run HSValidate (`TPCx-HS-master.sh:299`) and compare against the HSGen
+   CHECKSUM recorded in §6. Note the kit's known
+   `IndexOutOfBoundsException` issue (MAPREDUCE-6635) in `USER_GUIDE.txt`.
+5. Watch `df -h /` between phases; `05-hsgen.sh`'s 3× guard does not cover a
+   sort you launch by hand.
+
+---
+
+## 10. Repository layout
+
+```
+tpcxhs-m2/
+├── README.md                       this file
+├── .gitignore                      excludes binaries, HDFS data, keys
+├── conf/
+│   ├── hadoop/                     core/hdfs/yarn/mapred-site, hadoop-env, workers
+│   └── kit/                        our parameter overlay (no kit files — see EULA note)
+├── scripts/                        00-env, 01-install, 01b-ssh, 02-format,
+│                                   03-start, 04-stop, 05-hsgen, 06-verify, 07-hsdatacheck
+├── docs/
+│   ├── DESIGN.md                   components, roles, data flow (for the report)
+│   └── KIT-INTEGRATION.md          kit location, driver findings, scale arithmetic
+├── downloads/                      tarballs — gitignored
+└── logs/                           HSGen run logs — gitignored
+```
+
+Paths outside the repo: `~/opt/{java8,hadoop}` (software),
+`~/hadoop-data/{nn,dn,tmp,logs,pids,yarn}` (cluster state),
+`~/project/TPCx-HS_Kit_v2.0.3` (the kit, unmodified).

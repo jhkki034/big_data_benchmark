@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>1</value>
+    <description>
+      TPCx-HS Specification v2.0.3 clause 4.4 requires a replication factor of
+      at least 3. A single-node cluster physically cannot satisfy that, so this
+      run is NON-COMPLIANT by design and is for Milestone 2/3 coursework only.
+    </description>
+  </property>
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>file:///home/jiho/hadoop-data/nn</value>
+  </property>
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>file:///home/jiho/hadoop-data/dn</value>
+  </property>
+  <property>
+    <name>dfs.blocksize</name>
+    <value>134217728</value>
+    <description>128 MB. A 1 GB HSGen dataset therefore spans ~8 blocks.</description>
+  </property>
+  <property>
+    <name>dfs.namenode.http-address</name>
+    <value>localhost:9870</value>
+  </property>
+  <property>
+    <name>dfs.datanode.du.reserved</name>
+    <value>2147483648</value>
+    <description>Reserve 2 GB of the 30 GB volume so HDFS cannot fill the root fs.</description>
+  </property>
+  <property>
+    <name>dfs.namenode.secondary.http-address</name>
+    <value>localhost:9868</value>
+    <description>
+      Pinned to localhost on purpose. Left at the 0.0.0.0 default,
+      sbin/start-dfs.sh rewrites it to $(hostname) ("jihopc") and then tries to
+      ssh there, which fails because only localhost/127.0.0.1 are authorised.
+    </description>
+  </property>
+</configuration>
