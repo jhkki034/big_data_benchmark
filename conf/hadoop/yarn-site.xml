@@ -2,11 +2,13 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <!--
   Memory budget for this VM (total RAM 3.8 GB):
-    OS + resident services (Grafana, InfluxDB, VS Code server) ~ 2.0 GB
+    OS + resident services (VS Code server)                   ~ 1.7 GB
     HDFS/YARN daemon heaps (see hadoop-env.sh)                ~ 1.3 GB max
-    YARN container pool (below)                                 2048 MB
-  The pool deliberately overlaps with swap (3.8 GB) because MapReduce
-  containers are short-lived; pmem checking stays on to bound them.
+    YARN container pool (below)                                 2560 MB
+  Grafana and InfluxDB were removed from this VM on 2026-11-04, freeing
+  ~288 MB of resident memory; the pool was raised from 2048 to 2560 MB to
+  claim it. The pool still deliberately overlaps swap (3.8 GB) because
+  MapReduce containers are short-lived; pmem checking stays on to bound them.
 -->
 <configuration>
   <property>
@@ -19,7 +21,7 @@
   </property>
   <property>
     <name>yarn.nodemanager.resource.memory-mb</name>
-    <value>2048</value>
+    <value>2560</value>
   </property>
   <property>
     <name>yarn.nodemanager.resource.cpu-vcores</name>

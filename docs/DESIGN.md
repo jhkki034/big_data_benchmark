@@ -73,18 +73,19 @@ one with a shuffle:
 ```
 
 Peak disk demand is therefore roughly **3x the input** (HDFS input + local
-spill + HDFS output), which is the constraint that caps the dataset at 2 GB on
-a volume with 9.2 GB free. `scripts/05-hsgen.sh` enforces this before
+spill + HDFS output), which is the constraint that keeps the dataset at 1-2 GB on
+a volume with 11 GB free. `scripts/05-hsgen.sh` enforces this before
 generating anything.
 
 ## Why these memory numbers
 
-Total RAM is 3.8 GB and roughly 2.0 GB is already resident (Grafana, InfluxDB,
-two VS Code server instances). The budget:
+Total RAM is 3.8 GB and roughly 1.7 GB is already resident (the VS Code
+server; Grafana and InfluxDB were removed on 2026-11-04, freeing ~288 MB).
+The budget:
 
 ```
   daemon heaps (512+256+256+384+384)            = 1792 MB ceiling
-  YARN container pool                           = 2048 MB
+  YARN container pool                           = 2560 MB
   yarn.scheduler.maximum-allocation-mb          = 1024 MB  (one container cap)
 ```
 

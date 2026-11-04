@@ -18,18 +18,19 @@ is deliberately out of scope here; the cluster is left running and ready for it.
 | Architecture | **aarch64 (ARM64)** | `uname -m` |
 | Hostname | `jihopc` | `hostname` |
 | CPU | 6 vCPU | `nproc` |
-| RAM | 3.8 GiB total, ~1.7 GiB free | `free -h` |
+| RAM | 3.8 GiB total, ~1.0-1.2 GiB free with the cluster up | `free -h` |
 | Swap | 3.8 GiB | `free -h` |
-| Disk | 30 GB volume, **9.2 GB free** after build | `df -h /` |
+| Disk | 30 GB volume, **11 GB free** after build | `df -h /` |
 | Java | Eclipse Temurin **OpenJDK 1.8.0_504** (aarch64) | `java -version` |
 | Hadoop | Apache **3.3.6**, `linux-aarch_64` build | `hadoop version` |
 | Kit | **TPCx-HS v2.0.3**, MapReduce (MR2) jar | `VERSION.txt` |
 | Spec | TPCx-HS Specification v2.0.3 | `TPCx-HS Specification.docx` in the kit |
 
 Two numbers differed from the brief and are worth noting: free disk was
-**13 GB** at the start (not ~15 GB), and usable RAM is only ~1.7 GiB because
-Grafana, InfluxDB and two VS Code server instances are resident. Every memory
-setting below follows from that second number.
+**13 GB** at the start (not ~15 GB), and usable RAM is well under half the
+nominal 3.8 GiB because the VS Code server is resident. Every memory setting
+below follows from that second number. Grafana and InfluxDB were also resident
+until they were removed partway through (see §12).
 
 ### Why these versions
 
@@ -110,7 +111,7 @@ Committed under [`conf/hadoop/`](conf/hadoop/) and copied into
 | `dfs.blocksize` | 128 MB | Default; a 1 GB dataset spans ~7.5 blocks. |
 | `dfs.datanode.du.reserved` | 2 GB | Stops HDFS from filling the root filesystem. |
 | `dfs.namenode.secondary.http-address` | `localhost:9868` | Left at the `0.0.0.0` default, `start-dfs.sh` rewrites it to `$(hostname)` and ssh's to `jihopc`, which was not an authorised host — the SecondaryNameNode silently failed to start. |
-| `yarn.nodemanager.resource.memory-mb` | 2048 | The container pool, sized against ~1.7 GiB free RAM + swap. |
+| `yarn.nodemanager.resource.memory-mb` | 2560 | The container pool. Was 2048 while Grafana and InfluxDB were resident; raised after they were removed (see §12). |
 | `yarn.scheduler.maximum-allocation-mb` | 1024 | Caps any single container. |
 | `yarn.nodemanager.resource.cpu-vcores` | 4 | 6 vCPUs, 2 left for the OS and HDFS daemons. |
 | `yarn.nodemanager.vmem-check-enabled` | `false` | The JVM reserves a large virtual address space on aarch64; the default 2.1× vmem ratio kills healthy containers. Physical-memory enforcement stays on. |
@@ -248,13 +249,13 @@ hdfs://localhost:8020  27.8 G  961.7 M  9.1 G  3%
 ### Why the dataset stayed at 1 GB
 
 HSSort needs roughly **3× the input** (HDFS input + local spill + HDFS output).
-Against 9.2 GB free:
+Against 11 GB free (9.2 GB before the monitoring stack was removed):
 
 | Input | Sort needs | Left over | Verdict |
 |-------|-----------|-----------|---------|
-| 1 GB | ~2 GB | ~7 GB | comfortable — **chosen** |
-| 2 GB | ~4 GB | ~4 GB | safe ceiling for M3 |
-| 3 GB | ~6 GB | ~1 GB | collides with the 2 GB DataNode reserve |
+| 1 GB | ~2 GB | ~9 GB | comfortable — **chosen** |
+| 2 GB | ~4 GB | ~7 GB | safe |
+| 3 GB | ~6 GB | ~5 GB | now viable, but leaves little slack for logs and retries |
 
 1 GB is kept so Milestone 3 has room to work, and HSGen takes only 28 s if a
 larger set is wanted later. `05-hsgen.sh` enforces the 3× rule before
@@ -275,10 +276,9 @@ generating anything and refuses to overwrite an existing dataset.
    reasons in §6. No performance metric (HSph@SF) is produced or claimed.
 5. **Cluster Validation Suite skipped.** It requires `clush`/`pdsh`, which are
    meaningless on one node (and would need root to install).
-6. **Memory is oversubscribed.** The 2048 MB container pool overlaps swap, and
-   ~2 GB of RAM is held by unrelated services (Grafana, InfluxDB, VS Code
-   server). Milestone 3 sort timings will be pessimistic and should not be
-   compared against published results.
+6. **Memory is oversubscribed.** The 2560 MB container pool overlaps swap, and
+   ~1.7 GB of RAM is held by the VS Code server. Milestone 3 sort timings will
+   be pessimistic and should not be compared against published results.
 7. **Installed under `$HOME`, not system paths**, because `sudo` needs a
    password. Functionally equivalent, but not how a production cluster is laid
    out.
@@ -296,7 +296,8 @@ Milestones 2 and 3 ask for.
 The cluster is left **running** with the 1 GB dataset in place.
 
 1. Bring the cluster up if needed: `./scripts/03-start-cluster.sh`
-2. Decide the input size — **2 GB is the safe ceiling**, see §7. To change it:
+2. Decide the input size — **2 GB is the comfortable choice, 3 GB is now
+   reachable** after the extra 1.8 GB was freed, see §7. To change it:
    `hdfs dfs -rm -r -skipTrash /user/jiho/TPCx-HS-benchmark/HSsort-input`
    then `./scripts/05-hsgen.sh 2`
 3. Run HSSort with the kit's command line
@@ -349,3 +350,40 @@ drawn for slides: the HSGen data flow (showing the absent shuffle stage) and
 HSSort's three on-disk copies (showing where the 3× rule comes from). Open it
 in a browser, or view the published copy at
 <https://claude.ai/code/artifact/2fb9743e-8209-4cd2-9fd7-df390fc72307>.
+
+---
+
+## 12. Change log after the initial build
+
+**2026-11-04 — Grafana and InfluxDB removed from the VM.** They were holding
+~288 MB of resident memory and ~1.8 GB of disk. Removal was requested by the
+VM owner, who ran the privileged commands (this account has no passwordless
+`sudo`, and no credential was ever handled by the build scripts).
+
+The removal needed one repair. `influxdb2`'s maintainer script
+`/var/lib/dpkg/info/influxdb2.postrm` ends with
+
+```bash
+function disable_systemd {
+    systemctl disable influxdb
+}
+```
+
+with no error tolerance. An earlier partial removal had already deleted
+`influxdb.service`, so `systemctl disable influxdb` exited non-zero, that
+became the script's exit status, and `dpkg` aborted the removal — leaving the
+package half-configured and blocking all later `apt` operations. Appending
+`exit 0` to the script let `dpkg --purge` complete; nothing was lost, because
+the postrm's only real cleanup (`rm -f /etc/default/influxdb`) runs *before*
+the failing line. `dpkg --purge` rather than `apt purge` was used because the
+installed Grafana 13.1.1 is no longer in the configured repository, so apt
+could not resolve its version (`W: Can not find PkgVer for 'grafana'`).
+
+Consequent config change: `yarn.nodemanager.resource.memory-mb` 2048 → 2560.
+Verified afterwards that YARN reports `<memory:2560, vCores:4>`, all five
+daemons restart cleanly, and the 1 GB dataset is intact and `fsck` HEALTHY.
+
+This has no bearing on reproducing the build: `scripts/01-install.sh` through
+`07-hsdatacheck.sh` never touched those packages, and
+`scripts/99-remove-monitoring-stack.sh` is kept outside the numbered sequence
+because it is optional and destructive.
