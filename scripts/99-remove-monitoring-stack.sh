@@ -47,8 +47,8 @@ apt-get autoremove -y || true
 
 echo "==> removing data and config directories"
 rm -rf /var/lib/grafana /var/lib/influxdb /etc/grafana /etc/influxdb
-rm -rf /home/jiho/.influxdbv2
-rm -f  /home/jiho/.influx_history
+rm -rf "/home/${SUDO_USER:-$(logname 2>/dev/null)}/.influxdbv2"
+rm -f  "/home/${SUDO_USER:-$(logname 2>/dev/null)}/.influx_history"
 
 echo "==> result"
 dpkg -l | grep -iE "grafana|influx" || echo "  no grafana/influx packages remain"

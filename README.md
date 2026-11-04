@@ -65,24 +65,87 @@ intended for the report and slides.
 
 ---
 
-## 3. Build order
+## 3. Building this on a fresh VM
 
-Every step is a script in [`scripts/`](scripts/), numbered in run order and
-re-runnable from a clean VM.
+Everything below is derived at run time from `$HOME` and the current username,
+so a teammate does **not** need to be called `jiho` or use the same paths. The
+Hadoop XML files use `${user.home}` and `${user.name}`, which Hadoop's
+`Configuration` class expands from Java system properties; the shell scripts
+use `$HOME` and `$(id -un)`.
+
+### 3.1 Provision the VM
+
+Settings that the committed configuration assumes:
+
+| | Value | If you change it |
+|---|---|---|
+| Hypervisor | UTM on macOS (Apple Silicon) | any; only the guest matters |
+| Guest image | **Ubuntu Server 22.04 LTS, arm64** | an x86_64 guest needs different tarballs — see §3.2 |
+| vCPU | 4–6 | <4: lower `yarn.nodemanager.resource.cpu-vcores` and `NUM_MAPS` |
+| RAM | **4 GB** | <3.5 GB: lower `yarn.nodemanager.resource.memory-mb` and the daemon heaps |
+| Swap | ≥ 2 GB | the container pool deliberately oversubscribes RAM |
+| Disk | **30 GB** (≥ 10 GB free after the OS) | <6 GB free: not enough for a 1 GB run plus the sort |
+| Packages at install | tick **OpenSSH server** | otherwise `apt install -y openssh-server` before step 3.3 |
+
+Root is not required — everything installs under `$HOME`. The only privileged
+step is installing `openssh-server` if the image lacks it.
+
+### 3.2 Get the repository and the kit
 
 ```bash
+git clone <this repo> ~/tpcxhs-m2      # or copy the directory across
 cd ~/tpcxhs-m2
+```
+
+The TPCx-HS kit is **not** in this repository — its EULA forbids
+redistribution (§4 below). Download it from <https://www.tpc.org/tpcx-hs/> and
+unpack it so that the runtime suite sits at
+`~/project/TPCx-HS_Kit_v2.0.3/TPCx-HS-Runtime-Suite`, or put it anywhere and
+`export KIT_HOME=/path/to/TPCx-HS-Runtime-Suite`.
+
+On a non-aarch64 guest, edit `HADOOP_VERSION`, `HADOOP_TARBALL`,
+`HADOOP_MIRRORS`, `HADOOP_SHA512` and `JDK_URL` at the top of
+`scripts/00-env.sh` — Hadoop publishes `hadoop-<ver>.tar.gz` for x86_64 and
+`hadoop-<ver>-aarch64.tar.gz` for ARM64.
+
+### 3.3 Run the build
+
+```bash
+./scripts/00-preflight.sh      # checks arch, CPU, RAM, swap, disk, commands,
+                               # sshd, the kit, and every download mirror.
+                               # Fix anything marked FAIL before continuing.
 ./scripts/01-install.sh        # fetch + unpack JDK 8 and Hadoop, apply conf/
 ./scripts/01b-setup-ssh.sh     # passwordless ssh to localhost
 ./scripts/02-format-hdfs.sh    # format the NameNode (refuses if data exists)
 ./scripts/03-start-cluster.sh  # start HDFS + YARN, wait for safe mode, check jps
 ./scripts/05-hsgen.sh 1        # generate 1 GB with the kit's HSGen
 ./scripts/07-hsdatacheck.sh    # the kit's HSDataCheck + size/record accounting
-./scripts/06-verify.sh /user/jiho/TPCx-HS-benchmark/HSsort-input
+./scripts/06-verify.sh "/user/$(id -un)/TPCx-HS-benchmark/HSsort-input"
 ./scripts/04-stop-cluster.sh   # stop (data is kept)
 ```
 
-`scripts/00-env.sh` holds the shared environment and is sourced by the rest.
+Expect roughly: 5–15 min for `01-install.sh` (a 711 MB tarball), seconds for
+the rest, ~30 s for HSGen at 1 GB.
+
+`scripts/00-env.sh` holds the shared environment and is sourced by every other
+script. Run `01-install.sh` again at any time — it is idempotent: it skips a
+download whose checksum already matches, and will not append its block to
+`hadoop-env.sh` twice.
+
+### 3.4 Things that will bite you
+
+These were all hit during the original build and are now handled by the
+scripts, but they explain the non-obvious code:
+
+- **`dlcdn.apache.org` is slow and stalls.** Measured at ~180 KB/s and then
+  hanging outright. `00-env.sh` lists four mirrors and `01-install.sh` tries
+  them in order with `--read-timeout` so a stall moves to the next one rather
+  than hanging forever. `mirror.kakao.com` served the same file at ~1.8 MB/s.
+- **No `openssh-server` means no cluster.** `start-dfs.sh` SSHes into every
+  host in `etc/hadoop/workers`; with no sshd, zero daemons start and the error
+  is not obvious. `00-preflight.sh` fails loudly on this.
+- **`sudo` may need a password.** It does on this VM, which is why nothing
+  installs to system paths.
 
 ### Integrity
 
@@ -129,7 +192,7 @@ Kit settings are in [`conf/kit/Benchmark_Parameters.sh`](conf/kit/Benchmark_Para
 
 | Kit parameter | Shipped | Here | Reason |
 |---------------|---------|------|--------|
-| `HADOOP_USER` / `HDFS_USER` | `root` | `jiho` | No root; `jiho` formatted the NameNode and is the HDFS superuser. |
+| `HADOOP_USER` / `HDFS_USER` | `root` | `$(id -un)` | No root. The HDFS superuser is whichever account formatted the NameNode, i.e. whoever runs the build. |
 | `NUM_MAPS` | 768 | 4 | 4 vcores available. 768 maps would serialise into ~192 waves. |
 | `NUM_REDUCERS` | 768 | 4 | Ignored by HSGen (map-only), used by HSSort in M3. |
 
@@ -141,7 +204,8 @@ Hadoop's `start-dfs.sh` / `start-yarn.sh` ssh into every host in
 `etc/hadoop/workers` (here: `localhost`). `01b-setup-ssh.sh` creates a
 **dedicated** key (`~/.ssh/id_rsa_hadoop`) rather than touching any default
 identity, refuses to overwrite an existing key, and authorises
-`localhost`, `127.0.0.1`, `0.0.0.0` and the short hostname `jihopc`.
+`localhost`, `127.0.0.1`, `0.0.0.0` and the machine's own short hostname
+(`$(hostname)` — `jihopc` on this VM), which is the one `start-dfs.sh` needs.
 
 The key has an empty passphrase because the `sbin` scripts cannot answer a
 prompt. It is authorised for loopback only, and no key or passphrase is stored
@@ -203,7 +267,8 @@ The CHECKSUM is what HSValidate compares against in Milestone 3 — keep it.
 
 ## 7. Verification
 
-HDFS path: `/user/jiho/TPCx-HS-benchmark/HSsort-input`
+HDFS path: `/user/$(id -un)/TPCx-HS-benchmark/HSsort-input` — the transcript
+below is the real output from this VM, where that resolved to `/user/jiho/...`:
 
 ```
 $ hdfs dfs -ls /user/jiho/TPCx-HS-benchmark/HSsort-input
@@ -298,15 +363,15 @@ The cluster is left **running** with the 1 GB dataset in place.
 1. Bring the cluster up if needed: `./scripts/03-start-cluster.sh`
 2. Decide the input size — **2 GB is the comfortable choice, 3 GB is now
    reachable** after the extra 1.8 GB was freed, see §7. To change it:
-   `hdfs dfs -rm -r -skipTrash /user/jiho/TPCx-HS-benchmark/HSsort-input`
+   `hdfs dfs -rm -r -skipTrash "/user/$(id -un)/TPCx-HS-benchmark/HSsort-input"`
    then `./scripts/05-hsgen.sh 2`
 3. Run HSSort with the kit's command line
    (`TPCx-HS-master.sh:265`):
    ```bash
    hadoop jar $KIT/TPCx-HS-master_MR2.jar HSSort \
        -Dmapreduce.job.maps=4 -Dmapreduce.job.reduces=4 \
-       /user/jiho/TPCx-HS-benchmark/HSsort-input \
-       /user/jiho/TPCx-HS-benchmark/HSsort-output
+       "/user/$(id -un)/TPCx-HS-benchmark/HSsort-input" \
+       "/user/$(id -un)/TPCx-HS-benchmark/HSsort-output"
    ```
    Expect to tune `NUM_REDUCERS` — HSSort is the memory-hungry step and the one
    this VM is tight for.
@@ -327,8 +392,10 @@ tpcxhs-m2/
 ├── conf/
 │   ├── hadoop/                     core/hdfs/yarn/mapred-site, hadoop-env, workers
 │   └── kit/                        our parameter overlay (no kit files — see EULA note)
-├── scripts/                        00-env, 01-install, 01b-ssh, 02-format,
-│                                   03-start, 04-stop, 05-hsgen, 06-verify, 07-hsdatacheck
+├── scripts/                        00-env, 00-preflight, 01-install, 01b-ssh,
+│                                   02-format, 03-start, 04-stop, 05-hsgen,
+│                                   06-verify, 07-hsdatacheck,
+│                                   99-remove-monitoring-stack (optional)
 ├── docs/
 │   ├── DESIGN.md                   components, roles, data flow (for the report)
 │   └── KIT-INTEGRATION.md          kit location, driver findings, scale arithmetic
@@ -336,9 +403,14 @@ tpcxhs-m2/
 └── logs/                           HSGen run logs — gitignored
 ```
 
-Paths outside the repo: `~/opt/{java8,hadoop}` (software),
+Paths outside the repo, all under `$HOME` so no account is privileged:
+`~/opt/{java8,hadoop}` (software),
 `~/hadoop-data/{nn,dn,tmp,logs,pids,yarn}` (cluster state),
-`~/project/TPCx-HS_Kit_v2.0.3` (the kit, unmodified).
+`~/project/TPCx-HS_Kit_v2.0.3` (the kit, unmodified, not committed).
+
+Nothing in `conf/` or `scripts/` contains an absolute `/home/<user>` path: the
+XML files use `${user.home}` / `${user.name}` (expanded by Hadoop's
+`Configuration`) and the shell uses `$HOME` / `$(id -un)`.
 
 ---
 

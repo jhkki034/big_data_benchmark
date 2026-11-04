@@ -39,8 +39,8 @@
 #-----------------------------------
 # Common
 #-----------------------------------
-HADOOP_USER=jiho
-HDFS_USER=jiho
+HADOOP_USER="$(id -un)"
+HDFS_USER="$(id -un)"
 HDFS_BENCHMARK_DIR="TPCx-HS-benchmark"
 SLEEP_BETWEEN_RUNS=10
 

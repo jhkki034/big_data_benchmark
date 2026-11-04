@@ -10,9 +10,37 @@ mkdir -p "${DL_DIR}" "${OPT_DIR}"
 log "1/5 Verifying host is aarch64"
 [ "$(uname -m)" = "aarch64" ] || die "This script pins aarch64 binaries; host is $(uname -m)."
 
-log "2/5 Fetching tarballs (resumable)"
-wget -c -q --show-progress -O "${DL_DIR}/${JDK_TARBALL}"    "${JDK_URL}"
-wget -c -q --show-progress -O "${DL_DIR}/${HADOOP_TARBALL}" "${HADOOP_URL}"
+log "2/5 Fetching tarballs (resumable, mirror fallback)"
+
+# --read-timeout + --tries=0 matter: dlcdn.apache.org stalled mid-transfer during
+# this build and a plain wget hung indefinitely instead of retrying.
+WGET_OPTS=(-c -q --show-progress --read-timeout=20 --timeout=25 --tries=3 --waitretry=3)
+
+wget "${WGET_OPTS[@]}" -O "${DL_DIR}/${JDK_TARBALL}" "${JDK_URL}" \
+  || die "JDK download failed from ${JDK_URL}"
+
+HADOOP_FILE="${DL_DIR}/${HADOOP_TARBALL}"
+if [ -f "${HADOOP_FILE}" ] && [ -n "${HADOOP_SHA512:-}" ] \
+   && echo "${HADOOP_SHA512}  ${HADOOP_FILE}" | sha512sum -c --status 2>/dev/null; then
+  echo "Hadoop tarball already present and checksum-verified; skipping download"
+else
+  got=0
+  while read -r url; do
+    [ -n "${url}" ] || continue
+    echo "  trying $(echo "${url}" | cut -d/ -f3)"
+    if wget "${WGET_OPTS[@]}" -O "${HADOOP_FILE}" "${url}"; then got=1; break; fi
+    echo "  -> failed or stalled, next mirror"
+  done <<< "${HADOOP_MIRRORS}"
+  [ "${got}" -eq 1 ] || die "All mirrors failed. Mirrors tried:
+${HADOOP_MIRRORS}"
+fi
+
+if [ -n "${HADOOP_SHA512:-}" ]; then
+  echo "${HADOOP_SHA512}  ${HADOOP_FILE}" | sha512sum -c - \
+    || die "SHA512 mismatch on ${HADOOP_FILE}. Delete it and re-run."
+else
+  warn_no_checksum=1
+fi
 
 log "3/5 Unpacking JDK 8"
 if [ ! -d "${OPT_DIR}/java8" ] || [ ! -x "${OPT_DIR}/java8/bin/java" ]; then
