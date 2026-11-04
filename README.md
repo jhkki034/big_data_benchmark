@@ -338,3 +338,14 @@ tpcxhs-m2/
 Paths outside the repo: `~/opt/{java8,hadoop}` (software),
 `~/hadoop-data/{nn,dn,tmp,logs,pids,yarn}` (cluster state),
 `~/project/TPCx-HS_Kit_v2.0.3` (the kit, unmodified).
+
+---
+
+## 11. Presentation material
+
+[`docs/architecture-summary.html`](docs/architecture-summary.html) is a
+self-contained page covering the same ground as this README with two diagrams
+drawn for slides: the HSGen data flow (showing the absent shuffle stage) and
+HSSort's three on-disk copies (showing where the 3× rule comes from). Open it
+in a browser, or view the published copy at
+<https://claude.ai/code/artifact/2fb9743e-8209-4cd2-9fd7-df390fc72307>.
